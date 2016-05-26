@@ -184,11 +184,17 @@ var createDevicePickerController = function (opts, changeHandler) {
         }
 
         publisher = pub;
+        if (opts.eventRouter) {
+            opts.eventRouter.onPublisherCreated(publisher, opts.mode);
+        }
     }
 
     _devicePicker.cleanup = destroyExistingPublisher = function () {
         if (publisher) {
             publisher.destroy();
+            if (opts.eventRouter) {
+                opts.eventRouter.onPublisherDestroyed(publisher, opts.mode);
+            }
             publisher = void 0;
         }
     };
@@ -312,13 +318,63 @@ var authenticateForDeviceLabels = function (callback) {
     });
 };
 
+/*global EventEmitter*/
 function createOpentokHardwareSetupComponent(targetElement, options, callback) {
+
+    function _createHardwareSetupObject(opts) {
+        function HardwareSetupNoEvents() {
+        }
+        HardwareSetupNoEvents.prototype.onPublisherCreated = function () {}; //Nothing by default
+        HardwareSetupNoEvents.prototype.onPublisherDestroyed = function () {}; //Nothing by default
+
+        if (!opts.bUseEventEmitter) {
+            return new HardwareSetupNoEvents(); //Standard behavior, a dummy JS object
+        }
+
+        //Called said via bUseEventEmitter that the global class EventEmitter is available, so we us it
+        function HardwareSetupEventRouter() {
+            EventEmitter.call(this); // call super constructor
+        }
+        HardwareSetupEventRouter.prototype = Object.create(EventEmitter.prototype);
+        HardwareSetupEventRouter.prototype.constructor = HardwareSetupEventRouter;
+
+        HardwareSetupEventRouter.prototype._genericEventHandler = function (forwardedEventName, mode, event) {
+            this.emit(forwardedEventName, event, mode);
+        };
+
+        HardwareSetupEventRouter.prototype._forwardEvent = function (eventName, source, mode, eventPrefix) {
+            var forwardedEventName = ((typeof eventPrefix) === 'string') ? eventPrefix + eventName : eventName;
+            source.on(eventName, this._genericEventHandler.bind(this, forwardedEventName, mode));
+        };
+
+        HardwareSetupEventRouter.prototype._disconnectAllEvents = function (source) {
+            source.off(this);
+        };
+
+        HardwareSetupEventRouter.prototype.onPublisherCreated = function (publisher, mode) {
+            var eventPrefix = 'publisher-';
+            var eventNames = ['accessAllowed', 'accessDenied', 'accessDialogClosed', 'accessDialogOpened'];
+            if (mode === 'audioSource') {
+                eventNames.push('audioLevelUpdated');
+            }
+            each.call(eventNames, function (eventName) {
+                this._forwardEvent(eventName, publisher, mode, eventPrefix);
+            }, this);
+            this.emit('publisher-created', mode);
+        };
+        HardwareSetupEventRouter.prototype.onPublisherDestroyed = function (publisher, mode) {
+            this._disconnectAllEvents(publisher);
+            this.emit('publisher-destroyed', mode);
+        };
+
+        return new HardwareSetupEventRouter();
+    }
 
     if (typeof targetElement === 'string') {
         targetElement = document.getElementById(targetElement);
     }
 
-    var _hardwareSetup = {},
+    var _hardwareSetup = _createHardwareSetupObject(options),
         _options,
         state = 'getDevices',
         camera,
@@ -423,7 +479,8 @@ function createOpentokHardwareSetupComponent(targetElement, options, callback) {
                 selectTag: camSelector,
                 previewTag: camPreview,
                 mode: 'videoSource',
-                defaultDevice: _options.defaultVideoDevice
+                defaultDevice: _options.defaultVideoDevice,
+                eventRouter: _hardwareSetup
             }, function (controller) {
                 setPref('com.opentok.hardwaresetup.video', controller.pickedDevice.deviceId);
             });
@@ -432,7 +489,8 @@ function createOpentokHardwareSetupComponent(targetElement, options, callback) {
                 selectTag: micSelector,
                 previewTag: micPreview,
                 mode: 'audioSource',
-                defaultDevice: _options.defaultAudioDevice
+                defaultDevice: _options.defaultAudioDevice,
+                eventRouter: _hardwareSetup
             }, function (controller) {
                 setPref('com.opentok.hardwaresetup.audio', controller.pickedDevice.deviceId);
             });
